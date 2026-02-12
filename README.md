@@ -25,19 +25,43 @@ so this small Node backend bridges the gap:
 
 It's intended for localhost use on a user's machine, not as a public server.
 
-## Requirements
+## Requirements (Simple)
 
 - Windows (WASAPI / DirectSound)
-- Node.js 18+ (tested with current LTS)
-- `ffmpeg` on PATH for `/radio` (or set `FFMPEG_PATH`)
+- Node.js 18+ (current LTS is fine)
+- `ffmpeg` installed and on your PATH (required for `/radio`)
 
-## Install
+## Quick Start (Step by Step)
+
+1. Install Node.js (LTS): https://nodejs.org
+2. Install ffmpeg and make sure `ffmpeg` works in a terminal.
+3. Open a terminal in this folder and run:
 
 ```bash
 npm install
 ```
 
-## Run
+4. Start the backend:
+
+```bash
+node browser/proxy.js
+```
+
+You should see:
+
+```
+Proxy listening on http://127.0.0.1:9000
+```
+
+That means it is running.
+
+## Install (Manual)
+
+```bash
+npm install
+```
+
+## Run (Manual)
 
 ```bash
 node browser/proxy.js
