@@ -30,6 +30,7 @@ It's intended for localhost use on a user's machine, not as a public server.
 - Windows (WASAPI / DirectSound)
 - Node.js 18+ (current LTS is fine)
 - `ffmpeg` installed and on your PATH (required for `/radio`)
+  - https://ffmpeg.org/download.html
 
 ## Quick Start (Step by Step)
 
