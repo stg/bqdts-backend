@@ -1,0 +1,25 @@
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.env
+.env.*
+
+# Build/output
+dist/
+build/
+out/
+coverage/
+
+# Electron (backend-only repo)
+electron/
+electron-builder/
+electron-dist/
+*.asar
+
+# Dev-only helpers
+browser/dev_server.py
+
+# Docs (not required to run)
+shared/*.md

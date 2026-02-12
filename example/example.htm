@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Vibe Backend Example</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: #0f1115;
+        color: #e8edf5;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 20px;
+        font-weight: 600;
+      }
+      .row {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      label {
+        display: inline-flex;
+        gap: 8px;
+        align-items: center;
+        font-size: 14px;
+      }
+      select, button, input {
+        background: #1a1f2a;
+        color: #e8edf5;
+        border: 1px solid #2a3242;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 14px;
+      }
+      button {
+        cursor: pointer;
+      }
+      .log {
+        margin-top: 16px;
+        background: #0b0e14;
+        border: 1px solid #1f2633;
+        border-radius: 8px;
+        padding: 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Vibe Backend Example</h1>
+    <div class="row">
+      <label>Base URL <input id="baseUrl" value="http://127.0.0.1:9000" size="28" /></label>
+      <label>Sample Rate <input id="sr" value="48000" size="6" /></label>
+      <label>Channels <input id="ch" value="2" size="3" /></label>
+    </div>
+    <div class="row" style="margin-top: 12px;">
+      <label>Input Device <select id="input"></select></label>
+      <button id="refresh">Refresh</button>
+      <button id="connect">Connect</button>
+      <button id="disconnect" disabled>Disconnect</button>
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <div>Source status: <span id="sourceStatus">idle</span></div>
+      <div>Quality: <span id="sourceQuality">-</span></div>
+      <div>Bytes: <span id="sourceBytes">0</span></div>
+      <div>Chunks: <span id="sourceChunks">0</span></div>
+    </div>
+
+    <div class="row" style="margin-top: 16px;">
+      <label>Output Device <select id="output"></select></label>
+      <button id="sinkConnect">Connect Output</button>
+      <button id="sinkDisconnect" disabled>Disconnect Output</button>
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <div>Sink status: <span id="sinkStatus">idle</span></div>
+      <div>Quality: <span id="sinkQuality">-</span></div>
+      <div>Available: <span id="sinkAvail">-</span></div>
+      <div>Sent: <span id="sinkSent">0</span></div>
+    </div>
+
+    <div class="row" style="margin-top: 16px;">
+      <label style="min-width: 80px;">Radio URL</label>
+      <input id="radioUrl" value="http://example.com/stream" size="48" />
+      <button id="radioStart">Start Radio</button>
+      <button id="radioStop" disabled>Stop Radio</button>
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <div>Radio status: <span id="radioStatus">idle</span></div>
+      <div>Bytes: <span id="radioBytes">0</span></div>
+      <div>Chunks: <span id="radioChunks">0</span></div>
+      <div>Errors: <span id="radioErrors">0</span></div>
+    </div>
+
+    <div class="log" id="log"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const logEl = $("log");
+      let ws = null;
+      let opened = false;
+      let sourceBytes = 0;
+      let sourceChunks = 0;
+      let radioBytes = 0;
+      let radioChunks = 0;
+      let radioErrors = 0;
+      let radioAbort = null;
+      let radioReader = null;
+      let radioRunning = false;
+      let sinkWs = null;
+      let sinkOpened = false;
+      let sinkAvailable = 0;
+      let sinkSent = 0;
+      let sinkQueue = [];
+
+      const logLines = [];
+      function log(msg) {
+        const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        logLines.push(line);
+        while (logLines.length > 40) logLines.shift();
+        logEl.textContent = logLines.join("\n");
+      }
+
+      async function fetchJson(path) {
+        const baseUrl = $("baseUrl").value.trim();
+        const url = new URL(path, baseUrl);
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }
+
+      async function refreshDevices() {
+        const [inputs, outputs] = await Promise.all([
+          fetchJson("/source/list"),
+          fetchJson("/sink/list"),
+        ]);
+        const inList = Array.isArray(inputs.devices) ? inputs.devices : [];
+        const outList = Array.isArray(outputs.devices) ? outputs.devices : [];
+        const inputSelect = $("input");
+        inputSelect.innerHTML = "";
+        for (const d of inList) {
+          const opt = document.createElement("option");
+          opt.value = d.id;
+          opt.textContent = `${d.id}: ${d.name} (ch=${d.ch} sr=${d.sr || "?"})`;
+          inputSelect.appendChild(opt);
+        }
+        const outputSelect = $("output");
+        outputSelect.innerHTML = "";
+        for (const d of outList) {
+          const opt = document.createElement("option");
+          opt.value = d.id;
+          opt.textContent = `${d.id}: ${d.name} (ch=${d.ch} sr=${d.sr || "?"})`;
+          outputSelect.appendChild(opt);
+        }
+        log("Loaded " + inList.length + " input devices, " + outList.length + " output devices");
+      }
+
+      function wsUrl(path) {
+        return new URL(path, $("baseUrl").value.trim()).toString().replace("http", "ws");
+      }
+
+      function connect() {
+        const id = $("input").value;
+        const sr = $("sr").value.trim();
+        const ch = $("ch").value.trim();
+        const url = wsUrl(`/source/${id}?sr=${sr}&ch=${ch}`);
+        ws = new WebSocket(url);
+        ws.binaryType = "arraybuffer";
+        opened = false;
+        sourceBytes = 0;
+        sourceChunks = 0;
+        $("sourceStatus").textContent = "connecting";
+        $("sourceQuality").textContent = "-";
+        $("sourceBytes").textContent = "0";
+        $("sourceChunks").textContent = "0";
+        log("WS open " + url);
+        ws.onmessage = (ev) => {
+          const buf = new Uint8Array(ev.data);
+          if (!opened) {
+            opened = true;
+            $("sourceStatus").textContent = "open";
+            $("sourceQuality").textContent = String(buf[0]);
+            return;
+          }
+          sourceBytes += buf.byteLength;
+          sourceChunks += 1;
+          if (sourceChunks % 20 === 0) {
+            $("sourceBytes").textContent = String(sourceBytes);
+            $("sourceChunks").textContent = String(sourceChunks);
+          }
+        };
+        ws.onclose = () => {
+          $("sourceStatus").textContent = "closed";
+          log("WS closed");
+        };
+        ws.onerror = () => {
+          $("sourceStatus").textContent = "error";
+          log("WS error");
+        };
+        $("connect").disabled = true;
+        $("disconnect").disabled = false;
+      }
+
+      function disconnect() {
+        if (ws) ws.close();
+        ws = null;
+        $("connect").disabled = false;
+        $("disconnect").disabled = true;
+      }
+
+      function pumpSink() {
+        if (!sinkWs || sinkWs.readyState !== WebSocket.OPEN) return;
+        while (sinkQueue.length > 0 && sinkAvailable > 0) {
+          const buf = sinkQueue.shift();
+          sinkWs.send(buf);
+          sinkAvailable -= 1;
+          sinkSent += 1;
+        }
+        $("sinkAvail").textContent = String(sinkAvailable);
+        $("sinkSent").textContent = String(sinkSent);
+      }
+
+      function connectSink() {
+        const id = $("output").value;
+        const sr = $("sr").value.trim();
+        const ch = $("ch").value.trim();
+        const url = wsUrl(`/sink/${id}?sr=${sr}&ch=${ch}`);
+        sinkWs = new WebSocket(url);
+        sinkWs.binaryType = "arraybuffer";
+        sinkOpened = false;
+        sinkAvailable = 0;
+        sinkSent = 0;
+        sinkQueue = [];
+        $("sinkStatus").textContent = "connecting";
+        $("sinkQuality").textContent = "-";
+        $("sinkAvail").textContent = "-";
+        $("sinkSent").textContent = "0";
+        log("Sink WS open " + url);
+
+        sinkWs.onmessage = (ev) => {
+          const buf = new Uint8Array(ev.data);
+          if (!sinkOpened) {
+            sinkOpened = true;
+            $("sinkStatus").textContent = "open";
+            $("sinkQuality").textContent = String(buf[0]);
+            return;
+          }
+          if (buf.byteLength === 1) {
+            sinkAvailable = Math.min(255, sinkAvailable + buf[0]);
+            pumpSink();
+          }
+        };
+        sinkWs.onclose = () => {
+          $("sinkStatus").textContent = "closed";
+          log("Sink WS closed");
+        };
+        sinkWs.onerror = () => {
+          $("sinkStatus").textContent = "error";
+          log("Sink WS error");
+        };
+        $("sinkConnect").disabled = true;
+        $("sinkDisconnect").disabled = false;
+      }
+
+      function disconnectSink() {
+        if (sinkWs) sinkWs.close();
+        sinkWs = null;
+        sinkQueue = [];
+        $("sinkConnect").disabled = false;
+        $("sinkDisconnect").disabled = true;
+      }
+
+      async function startRadio() {
+        const baseUrl = $("baseUrl").value.trim();
+        const sr = Number($("sr").value.trim() || 48000);
+        const ch = Number($("ch").value.trim() || 2);
+        const streamUrl = $("radioUrl").value.trim();
+        if (!streamUrl) {
+          log("Radio URL required");
+          return;
+        }
+        log("Radio start " + streamUrl);
+        $("radioStatus").textContent = "connecting";
+        radioBytes = 0;
+        radioChunks = 0;
+        radioErrors = 0;
+        $("radioBytes").textContent = "0";
+        $("radioChunks").textContent = "0";
+        $("radioErrors").textContent = "0";
+
+        const url = new URL("/radio", baseUrl);
+        url.searchParams.set("url", streamUrl);
+        url.searchParams.set("sr", String(sr));
+
+        radioAbort = new AbortController();
+        radioRunning = true;
+        const res = await fetch(url.toString(), { signal: radioAbort.signal });
+        if (!res.ok || !res.body) {
+          radioErrors += 1;
+          $("radioErrors").textContent = String(radioErrors);
+          $("radioStatus").textContent = "error";
+          throw new Error("Radio HTTP " + res.status);
+        }
+
+        $("radioStatus").textContent = "streaming";
+        log("Radio streaming");
+        radioReader = res.body.getReader();
+        let pending = new Uint8Array(0);
+        const chunkSizeBytes = 4 * ch * 128;
+
+        const pump = async () => {
+          while (true) {
+            if (!radioRunning) break;
+            const { done, value } = await radioReader.read();
+            if (done || !radioRunning) break;
+            if (value && value.byteLength > 0) {
+              const combined = new Uint8Array(pending.length + value.byteLength);
+              combined.set(pending, 0);
+              combined.set(value, pending.length);
+              pending = combined;
+              while (pending.length >= chunkSizeBytes) {
+                const slice = pending.subarray(0, chunkSizeBytes);
+                const payload = slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength);
+                if (sinkWs && sinkWs.readyState === WebSocket.OPEN) {
+                  sinkQueue.push(payload);
+                  pumpSink();
+                }
+                radioBytes += slice.byteLength;
+                radioChunks += 1;
+                if (radioChunks % 20 === 0) {
+                  $("radioBytes").textContent = String(radioBytes);
+                  $("radioChunks").textContent = String(radioChunks);
+                }
+                pending = pending.subarray(chunkSizeBytes);
+              }
+            }
+          }
+          if (radioRunning) {
+            $("radioStatus").textContent = "stopped";
+          }
+        };
+
+        pump().catch((err) => {
+          if (!radioRunning) return;
+          radioErrors += 1;
+          $("radioErrors").textContent = String(radioErrors);
+          $("radioStatus").textContent = "error";
+          log("Radio error: " + (err && err.message ? err.message : err));
+        });
+      }
+
+      function stopRadio() {
+        radioRunning = false;
+        if (radioAbort) {
+          radioAbort.abort();
+          radioAbort = null;
+        }
+        if (radioReader) {
+          try { radioReader.cancel(); } catch {}
+          radioReader = null;
+        }
+        $("radioStatus").textContent = "stopped";
+        log("Radio stopped");
+      }
+
+      $("refresh").addEventListener("click", () => refreshDevices().catch(err => log("Error: " + err.message)));
+      $("connect").addEventListener("click", connect);
+      $("disconnect").addEventListener("click", disconnect);
+      $("sinkConnect").addEventListener("click", connectSink);
+      $("sinkDisconnect").addEventListener("click", disconnectSink);
+      $("radioStart").addEventListener("click", () => {
+        $("radioStart").disabled = true;
+        $("radioStop").disabled = false;
+        startRadio().catch(err => log("Radio error: " + err.message));
+      });
+      $("radioStop").addEventListener("click", () => {
+        stopRadio();
+        $("radioStart").disabled = false;
+        $("radioStop").disabled = true;
+      });
+
+      refreshDevices().catch(err => log("Error: " + err.message));
+    </script>
+  </body>
+</html>
